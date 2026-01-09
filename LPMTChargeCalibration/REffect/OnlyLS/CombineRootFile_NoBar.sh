@@ -1,0 +1,1 @@
+root -l -q /junofs/users/chuziliang125/LPMTChargeCalibration/REffect/OnlyLS/CombineRootFile_NoBar.cc

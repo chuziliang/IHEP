@@ -1,0 +1,1 @@
+source /cvmfs/juno.ihep.ac.cn/centos7_amd64_gcc1120/Pre-Release/J23.1.0-rc2/setup.sh

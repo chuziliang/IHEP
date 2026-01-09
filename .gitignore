@@ -1,0 +1,106 @@
+# Linux系统文件
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+.hidden
+.swp
+.swo
+.autorelabel
+.cfs*
+.rpmdb
+*.rpmnew
+*.rpmold
+*.rpmsave
+
+# 编译生成的文件
+*.com
+*.class
+*.so
+*.o
+*.out
+*.app
+*.exe
+*.dll
+
+# 日志文件
+*.log
+*.log.*
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+*.cache
+.cache/
+/tmp/
+/var/tmp/
+
+# 编辑器配置文件
+.vscode/
+.idea/
+.cache/
+.config/
+.vscode-server/
+*.sw?
+
+# 包管理器文件
+node_modules/
+jspm_packages/
+venv/
+env/
+.env
+.env.local
+.env.*.local
+*.pyc
+__pycache__/
+*.egg-info/
+.pip/
+.maven/
+.gradle/
+build/
+target/
+*.jar
+*.war
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.sql.gz
+
+# 测试文件
+coverage/
+.nyc_output/
+*.lcov
+
+# 其他
+*.bak
+*.old
+*.backup
+*.zip
+*.rar
+*.tar
+*.tar.gz
+*.7z
+*.root
+*.txt
+*.bin
+*.npz
+
+20231215_TCP_IP_ABC23_IHEP/
+ABCCalibFactor/
+calib10m/chuziliang/result*
+ziliang_env/
+*.err.*
+*.out.*
+JUNO_offline/
+Pedestal/
+SPMT_data_analysis/**/result/
+SPMT_data_analysis/**/Result/
+*job*.sh
+*Job*.sh
+**/job/
+**/Job/

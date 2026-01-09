@@ -1,0 +1,621 @@
+const double QuantilesR[20] = {11830, 14778.3, 16948.3, 18591.7, 20054, 21497.5, 22676, 23890, 24942, 25821.7, 26645, 27396.7, 28168.3, 28955, 29728, 30610, 31603.3, 32616.7, 33966.7, 39990};
+
+const double QuantilesE[10] = {3.4449470,4.7075471,5.6179705,6.3958938,7.123,7.8501062,8.6280295,9.5384529,10.801053,100};
+
+struct DataWithError
+{
+    double Data;
+    double Error;
+};
+
+struct Vector3D
+{
+    double x,y,z;
+};
+
+double DotProduct(Vector3D A, Vector3D B)//求两个向量的点乘
+{
+    double result;
+    result = A.x*B.x + A.y*B.y + A.z*B.z;
+    return result;
+}
+
+double Norm(Vector3D A)//求向量的模
+{
+    double result;
+    result = sqrt(pow(A.x, 2) + pow(A.y, 2) + pow(A.z, 2));
+    return result;
+}
+
+Vector3D VectorMinus(Vector3D A,Vector3D B)//A向量减B向量
+{
+    Vector3D result;
+    result.x = A.x - B.x;
+    result.y = A.y - B.y;
+    result.z = A.z - B.z;
+    return result;
+}
+
+double GetLPMTPosition(Vector3D (&LPMTPosition)[17612])
+{
+    ifstream file("/cvmfs/juno.ihep.ac.cn/centos7_amd64_gcc830/Pre-Release/J22.1.0-rc4/data/Detector/Geometry/PMTPos_CD_LPMT.csv");
+    string line;
+
+    while (getline(file, line)) 
+    {
+        stringstream ss(line);
+        Vector3D PMT;
+        double nun;
+        int currentPMT;
+        ss >> currentPMT >> PMT.x >> PMT.y >> PMT.z >> nun >> nun;
+        LPMTPosition[currentPMT] = PMT;
+    }
+
+    file.close();
+    return 0;
+}
+
+double GetTheta(Vector3D PMT,Vector3D edep)
+{
+    Vector3D LPMT_edep;//PMT指向能量沉积点的向量
+    LPMT_edep = VectorMinus(edep,PMT);
+    Vector3D FZ;
+    FZ.x = -PMT.x;
+    FZ.y = -PMT.y;
+    FZ.z = -PMT.z;
+    double z = DotProduct(FZ,LPMT_edep)/Norm(FZ);
+    double r = Norm(LPMT_edep);
+    double angle = acos(z/r) * 180 / M_PI;
+    return angle;
+}
+
+double GetR(Vector3D PMT,Vector3D edep)
+{
+    Vector3D LPMT_edep;//PMT指向能量沉积点的向量
+    LPMT_edep = VectorMinus(edep,PMT);
+    double r = Norm(LPMT_edep);
+    return r;
+}
+
+//修正前后电荷的对应关系函数，这个函数的自变量是真实电荷，因变量是包含阈值和暗噪声效应的电荷
+double Myfunction(double* x, double* par) //par[0] = Threshold, par[1] = Sigma_SPE, par[2] = DarkRate
+{
+    double P0 = 0;
+    double DarkRateCharge = par[2]*1e-6;//1000ns内暗噪声贡献的电荷的均值
+    double xx = x[0]+DarkRateCharge;//暗噪声和物理事例总的电荷均值
+    P0 += ROOT::Math::poisson_pdf(0,xx);//均值为“xx”时，测到0 PE的概率
+    for (int i = 1; i < 20; i++)//均值为“xx”时，测到i PE且过阈的概率。认为“xx”几乎不会超过5PE
+    {
+        P0 += ROOT::Math::poisson_pdf(i,xx)*ROOT::Math::normal_cdf(par[0],par[1]*sqrt((double)i),(double)i);
+    }
+    return -TMath::Log(P0);
+}
+
+DataWithError GetTrueCharge(DataWithError RoughCharge, DataWithError DarkRate)//RoughCharge为修正前的电荷，输出修正后的电荷
+{
+    DataWithError TrueCharge;
+    // if (DarkRate.Data > RoughCharge.Data)
+    // {
+    //     TrueCharge.Data = -1;
+    //     TrueCharge.Error = -1;
+    // }
+    double R_Spe = 33.2/100.0;  //J22.1.0-rc4，SPMT电子学模拟中使用了固定分辨率
+    double Threshold = 1.0/3.0; //J22.1.0-rc4，SPMT电子学模拟中使用了固定阈值
+    auto f = new TF1("function",Myfunction,0,5,3);
+    f->SetParameters(Threshold,R_Spe,DarkRate.Data);
+    TrueCharge.Data = f->GetX(RoughCharge.Data,0,0,1.E-12,1000,false);//反解出真实电荷
+
+    //传递误差
+    double df;
+    df = f->Derivative(TrueCharge.Data,nullptr,1.e-5);
+    TrueCharge.Error = sqrt( RoughCharge.Error*RoughCharge.Error/(df*df) + DarkRate.Error*DarkRate.Error );
+    return TrueCharge;
+}
+
+DataWithError GetP0Mu(int TotalEvents, int ZeroEvents)
+{
+    double P0 = (double)(ZeroEvents)/(double)(TotalEvents);
+    double mean = -TMath::Log(P0);
+    double error = mean/TotalEvents;
+    error = sqrt(error);
+    DataWithError P0Mu;
+    P0Mu.Data = mean;
+    P0Mu.Error = error;
+    return P0Mu;
+}
+
+DataWithError CombineResult(const vector<double>& x, const vector<double>& e)
+{
+    double sum_x = 0.0;
+    double sum_w = 0.0;
+    double sum_e = 0.0;
+
+    for (int i = 0; i < x.size(); i++) {
+        double w = 1;
+        sum_x += w * x[i];
+        sum_w += w;
+        sum_e += e[i]*e[i];
+    }
+    sum_e = sqrt(sum_e)/sum_w;
+    DataWithError combined_result;
+    combined_result.Data = sum_x / sum_w;
+    combined_result.Error = sum_e;
+
+    return combined_result;
+}
+
+double combined_measurement(const vector<double>& x, const vector<double>& e) 
+{
+    double sum_x = 0.0;
+    double sum_w = 0.0;
+
+    for (int i = 0; i < x.size(); i++) {
+        double w = 1 / (e[i] * e[i]);
+        sum_x += w * x[i];
+        sum_w += w;
+    }
+
+    double combined_x = sum_x / sum_w;
+    return combined_x;
+}
+
+double combined_error(const vector<double>& e) 
+{
+    double sum_w = 0.0;
+
+    for (int i = 0; i < e.size(); i++) {
+        double w = 1 / (e[i] * e[i]);
+        sum_w += w;
+    }
+
+    double combined_e = 1 / sqrt(sum_w);
+    return combined_e;
+}
+
+Double_t SetNonlinearityFunction(Double_t *x, Double_t *par)
+{
+   double xx =x[0];
+   double miu = 500 - sqrt(500*500 - 1000*xx);
+   Double_t f = (1-0.1*miu/100.0)/(1-0.1*par[0]/100.0)-1;
+   return f;
+}
+
+int GetCorrespondingSPMT(int (&CorrespondingSPMT)[17612][6])
+{
+    ifstream file("/junofs/users/chuziliang125/LPMTChargeCalibration/FindCorrespondingSPMT/PMTID_map.txt");
+    string line;
+    int currentLine = 0;
+    int SPMT_ID[6];
+
+    while (getline(file, line)) 
+    { 
+        stringstream ss(line);
+        int LPMTID;
+        ss >> LPMTID >> SPMT_ID[0] >> SPMT_ID[1] >> SPMT_ID[2] >> SPMT_ID[3] >> SPMT_ID[4] >> SPMT_ID[5];
+        for (int i = 0; i < 6; i++)
+        {
+            CorrespondingSPMT[LPMTID][i] = SPMT_ID[i];
+        }
+    }
+
+    file.close();
+    return 0;
+}
+
+double GetSPMTQE(double (&SPMTQE)[25600])
+{
+    double Effiency;
+    TFile *inputfile = TFile::Open("/cvmfs/juno.ihep.ac.cn/centos7_amd64_gcc830/Pre-Release/J22.1.0-rc4/data/Simulation/SimSvc/PMTSimParamSvc/PMTParam_CD_SPMT.root","read");
+    TTree *PMTData = (TTree*)inputfile->Get("data");
+    int PMTID;
+    PMTData->SetBranchAddress("pmtID",&PMTID);
+    PMTData->SetBranchAddress("QE",&Effiency);
+    for (int id = 0; id < 25600; id ++)
+    {
+        PMTData->GetEntry(id);
+        SPMTQE[id] = Effiency;
+    }
+    
+    // if (PMTID == SPMTID)
+    // {
+    //     inputfile->Close();
+    //     return 100*Effiency;
+    // }
+    // else
+    // {
+    //     cout<<"Wrong SPMTID!!!"<<endl;
+    //     inputfile->Close();
+    //     return 0;
+    // }
+
+    inputfile->Close();
+    return 0;
+}
+
+double GetLPMTQE(double (&LPMTQE)[17612])
+{
+    double Effiency;
+    TFile *inputfile = TFile::Open("/cvmfs/juno.ihep.ac.cn/centos7_amd64_gcc830/Pre-Release/J22.1.0-rc4/data/Simulation/SimSvc/PMTSimParamSvc/PMTParam_CD_LPMT.root","read");
+    TTree *PMTData = (TTree*)inputfile->Get("data");
+    int PMTID;
+    PMTData->SetBranchAddress("pmtID",&PMTID);
+    PMTData->SetBranchAddress("PDE",&Effiency);
+    for (int id = 0; id < 17612; id ++)
+    {
+        PMTData->GetEntry(id);
+        LPMTQE[id] = Effiency/100.0;
+    }
+    
+    // if (PMTID == LPMTID)
+    // {
+    //     inputfile->Close();
+    //     return Effiency;
+    // }
+    // else
+    // {
+    //     cout<<"Wrong LPMTID!!!"<<endl;
+    //     inputfile->Close();
+    //     return 0;
+    // }
+
+    inputfile->Close();
+    return 0;
+}
+
+double GetSPMTDCR(double (&SPMTDCR)[25600])
+{
+    TFile *DarkRate_file = TFile::Open("/cvmfs/juno.ihep.ac.cn/centos7_amd64_gcc830/Pre-Release/J22.1.0-rc4/data/Simulation/SimSvc/PMTSimParamSvc/PMTParam_CD_SPMT.root");
+    TTree *PMTData = (TTree*)DarkRate_file->Get("data");
+    double darkRate;
+    PMTData->SetBranchAddress("darkRate",&darkRate);
+    for (int i = 0; i < 25600; i++)
+    {
+        PMTData->GetEntry(i);
+        SPMTDCR[i] = darkRate;
+    }
+    DarkRate_file->Close();
+    return 0;
+}
+
+double GetDistanceToBar(double (&DistanceToBar)[17612])
+{
+    ifstream file("/junofs/users/chuziliang125/LPMTChargeCalibration/FindNode/PMTID_map.txt");
+    string line;
+    while (getline(file, line)) 
+    { 
+        stringstream ss(line);
+        int LPMTID;
+        double Distance;
+        double BarID;
+        ss >> LPMTID >> BarID >> Distance;
+        DistanceToBar[LPMTID] = Distance;
+    }
+
+    file.close();
+    return 0;
+}
+
+int npeLPMTtonpeSPMT_B12_DetSim()
+{
+    // 初始化要用到的PMT参数
+    double LPMTQE[17612];
+    double SPMTQE[25600];
+    double SPMTDCR[25600];
+    int CorrespondingSPMT[17612][6];
+    double DistanceToBar[17612];
+    Vector3D LPMTPosition[17612];
+
+    GetLPMTQE(LPMTQE);
+    GetSPMTQE(SPMTQE);
+    GetCorrespondingSPMT(CorrespondingSPMT);
+    GetSPMTDCR(SPMTDCR);
+    GetDistanceToBar(DistanceToBar);
+    GetLPMTPosition(LPMTPosition);
+    
+    // 定义需要计算的数据，完成初始化
+    vector<vector<vector<double>>> LPMTMu(17612,vector<vector<double>>(20,vector<double>(10,0)));  //LPMTMu[LPMTID][QR][QE]
+    vector<vector<vector<double>>> LPMTMuErr(17612,vector<vector<double>>(20,vector<double>(10,0)));
+    vector<vector<vector<double>>> Entries(17612,vector<vector<double>>(20,vector<double>(10,0)));
+
+    vector<vector<vector<vector<int>>>> SPMT0(17612,vector<vector<vector<int>>>(20,vector<vector<int>>(10,vector<int>(6,0)))); //SPMT0[LPMTID][QR][QE][corruspondingID]
+    // vector<vector<vector<vector<int>>>> SPMTTotal(17612,vector<vector<vector<int>>>(20,vector<vector<int>>(10,vector<int>(6,0))));
+
+    vector<vector<vector<vector<double>>>> SPMTMu(17612,vector<vector<vector<double>>>(20,vector<vector<double>>(10,vector<double>(6,0))));
+    vector<vector<vector<vector<double>>>> SPMTMuErr(17612,vector<vector<vector<double>>>(20,vector<vector<double>>(10,vector<double>(6,0))));
+
+    vector<vector<vector<vector<double>>>> SPMTTrueMu(17612,vector<vector<vector<double>>>(20,vector<vector<double>>(10,vector<double>(6,0))));
+    vector<vector<vector<vector<double>>>> SPMTTrueMuErr(17612,vector<vector<vector<double>>>(20,vector<vector<double>>(10,vector<double>(6,0))));
+
+    vector<vector<vector<double>>> AverageSPMTMu(17612,vector<vector<double>>(20,vector<double>(10,0)));  //LPMTMu[LPMTID][QR][QE]
+    vector<vector<vector<double>>> AverageSPMTMuErr(17612,vector<vector<double>>(20,vector<double>(10,0)));
+
+    vector<vector<vector<double>>> AverageTrueSPMTMu(17612,vector<vector<double>>(20,vector<double>(10,0)));  //LPMTMu[LPMTID][QR][QE]
+    vector<vector<vector<double>>> AverageTrueSPMTMuErr(17612,vector<vector<double>>(20,vector<double>(10,0)));
+
+    vector<vector<vector<double>>> LPMTTrueMu(17612,vector<vector<double>>(20,vector<double>(10,0)));  //LPMTTrueMu[LPMTID][QR][QE]
+    vector<vector<vector<double>>> LPMTTrueMuErr(17612,vector<vector<double>>(20,vector<double>(10,0)));
+
+    vector<vector<double>> TotalLPMTMu_QE(20,vector<double>(10,0));
+    vector<vector<double>> TotalLPMTMu_QEErr(20,vector<double>(10,0));
+
+    vector<vector<double>> TotalTrueLPMTMu_QE(20,vector<double>(10,0));
+    vector<vector<double>> TotalTrueLPMTMu_QEErr(20,vector<double>(10,0));
+
+    vector<vector<double>> TotalSPMTMu_QE(20,vector<double>(10,0));
+    vector<vector<double>> TotalSPMTMu_QEErr(20,vector<double>(10,0));
+
+    vector<vector<double>> TotalTrueSPMTMu_QE(20,vector<double>(10,0));
+    vector<vector<double>> TotalTrueSPMTMu_QEErr(20,vector<double>(10,0));
+
+    vector<double> ToGraph_TotalLPMTMu_QE;
+    vector<double> ToGraph_TotalLPMTMu_QEErr;
+
+    vector<double> ToGraph_TotalTrueLPMTMu_QE;
+    vector<double> ToGraph_TotalTrueLPMTMu_QEErr;
+
+    vector<double> ToGraph_TotalSPMTMu_QE;
+    vector<double> ToGraph_TotalSPMTMu_QEErr;
+
+    vector<double> ToGraph_TotalTrueSPMTMu_QE;
+    vector<double> ToGraph_TotalTrueSPMTMu_QEErr;
+
+    cout<<"Start reading"<<endl;
+    for (int FileId = 0; FileId < 10; FileId++)
+    {
+        TString InputFileName = TString::Format("/junofs/users/chuziliang125/LPMTChargeCalibration/ToyWaveformReconstruction/Alter_10Percent_100PE_B12/NoSticksTest/ChargeSpectrum/ChargeSpectrum%1d.root",FileId);
+        TFile *inputfile = TFile::Open(InputFileName,"read");
+
+        if (!inputfile) continue;
+
+        TTree *charge = (TTree*)inputfile->Get("charge");
+        vector<double> *TrueChargeLPMT;
+        vector<double> *TrueChargeSPMT;
+        double edep_x, edep_y, edep_z;
+        double edep;
+
+        charge->SetBranchAddress("TrueLPMTCharge",&TrueChargeLPMT);
+        charge->SetBranchAddress("TrueSPMTCharge",&TrueChargeSPMT);
+        charge->SetBranchAddress("edep_x",&edep_x);
+        charge->SetBranchAddress("edep_y",&edep_y);
+        charge->SetBranchAddress("edep_z",&edep_z);
+        charge->SetBranchAddress("edep",&edep);
+
+        for (int entry = 0; entry < charge->GetEntries(); entry++)
+        {
+            charge->GetEntry(entry);
+            Vector3D Edep_position;
+            Edep_position.x = edep_x;
+            Edep_position.y = edep_y;
+            Edep_position.z = edep_z;
+
+            if (Norm(Edep_position) > 15800)
+            {
+                continue;
+            }
+            
+            int EnergyNum = 0;
+            for (int i = 0; i < 10; i++)
+            {
+                if (edep < QuantilesE[i])
+                {
+                    EnergyNum = i;
+                    break;
+                }
+            }
+            
+            for (int LPMTID = 0; LPMTID < 17612; LPMTID++)
+            {
+                // 排除掉离支撑杆太近的PMT
+                if (DistanceToBar[LPMTID] < 2000) 
+                {
+                    continue;
+                }
+                // 计算事例与LPMT间的theta角
+                double Theta = 0;
+                Theta = GetTheta(LPMTPosition[LPMTID],Edep_position);
+                // cout<<"Theta = "<<Theta<<endl;
+                if (Theta > 20) continue;
+
+                // 计算事例与LPMT之间的距离
+                double distance;
+                distance = GetR(LPMTPosition[LPMTID],Edep_position);
+
+                int DistanceNum = 0;
+                for (int i = 0; i < 20; i++)
+                {
+                    if (distance < QuantilesR[i])
+                    {
+                        DistanceNum = i;
+                        break;
+                    }
+                }
+
+                Entries[LPMTID][DistanceNum][EnergyNum]++;
+                // cout<<"Select an event_LPMT"<<endl;
+
+                // SPMT0中Fill选中的LPMT_Event对
+                for (int ID = 0; ID < 6; ID++)
+                {
+
+                    if ((CorrespondingSPMT[LPMTID][ID] >= 300000))
+                    {
+                        SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID] += (*TrueChargeSPMT)[CorrespondingSPMT[LPMTID][ID] - 300000];
+                        SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID] += (*TrueChargeSPMT)[CorrespondingSPMT[LPMTID][ID] - 300000]*(*TrueChargeSPMT)[CorrespondingSPMT[LPMTID][ID] - 300000];
+                    }
+                    
+                }
+                
+                // LPMTTrueMu中Fill选中的LPMT_Event对
+                LPMTTrueMu[LPMTID][DistanceNum][EnergyNum]  += (*TrueChargeLPMT)[LPMTID];
+                LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] += (*TrueChargeLPMT)[LPMTID]*(*TrueChargeLPMT)[LPMTID];
+            }
+        }
+
+        inputfile->Close();
+        cout<<"File "<<FileId<<" finished"<<endl;
+    }
+
+    cout<<"Start analyzing"<<endl;
+    for (int DistanceNum = 0; DistanceNum < 20; DistanceNum++)
+    {
+        for (int EnergyNum = 0; EnergyNum < 10; EnergyNum++)
+        {
+            double SelectLPMT = 0;
+            double SelectEntries = 0;
+            for (int LPMTID = 0; LPMTID < 17612; LPMTID++)
+            {
+                // 得到正确的LPMTMu、SPMTMu、SPMTP0、LPMTTrueMu
+                if (Entries[LPMTID][DistanceNum][EnergyNum] > 0)
+                {
+                    LPMTTrueMu[LPMTID][DistanceNum][EnergyNum] /= Entries[LPMTID][DistanceNum][EnergyNum];
+                    LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] /= Entries[LPMTID][DistanceNum][EnergyNum];
+                    LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] -= LPMTTrueMu[LPMTID][DistanceNum][EnergyNum]*LPMTTrueMu[LPMTID][DistanceNum][EnergyNum];
+                    LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] = sqrt(LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum]/Entries[LPMTID][DistanceNum][EnergyNum]);
+
+                    LPMTTrueMu[LPMTID][DistanceNum][EnergyNum] /= LPMTQE[LPMTID];
+                    LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] /= LPMTQE[LPMTID];
+
+                    double SelectSPMTNum = 0;
+                    for (int ID = 0; ID < 6; ID++)
+                    {
+                        if (CorrespondingSPMT[LPMTID][ID] >= 300000)
+                        {
+                            SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID] /= Entries[LPMTID][DistanceNum][EnergyNum];
+                            SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID] /= Entries[LPMTID][DistanceNum][EnergyNum];
+                            SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID] -= SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID]*SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID];
+                            SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID] = sqrt(SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID]/Entries[LPMTID][DistanceNum][EnergyNum]);
+
+                            SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID] /= SPMTQE[CorrespondingSPMT[LPMTID][ID] - 300000];
+                            SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID] /= SPMTQE[CorrespondingSPMT[LPMTID][ID] - 300000];
+
+                            AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum] += SPMTTrueMu[LPMTID][DistanceNum][EnergyNum][ID];
+                            AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum] += SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID]*SPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum][ID];
+                            SelectSPMTNum += 1;
+                        }
+                    }
+
+                    if (SelectSPMTNum > 0)
+                    {
+                        AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum] /= SelectSPMTNum;
+                        AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum] = sqrt(AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum])/SelectSPMTNum;
+                    }
+                    else
+                    {
+                        AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum] = -1;
+                        AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum] = -1;
+                    }
+                }
+                else
+                {
+                    LPMTMu[LPMTID][DistanceNum][EnergyNum] = -1;
+                    LPMTMuErr[LPMTID][DistanceNum][EnergyNum] = -1;
+                    LPMTTrueMu[LPMTID][DistanceNum][EnergyNum] = -1;
+                    LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum] = -1;
+                    // AverageSPMTMu[LPMTID][DistanceNum][EnergyNum] = -1;
+                    // AverageSPMTMuErr[LPMTID][DistanceNum][EnergyNum] = -1;
+                    AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum] = -1;
+                    AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum] = -1;
+                }
+
+                // 计算平均LPMTMu、SPMTMu、SPMTP0、LPMTTrueMu，考虑QE
+                if ( (LPMTTrueMu[LPMTID][DistanceNum][EnergyNum] > 0) && (AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum]>0))
+                {
+                    TotalTrueSPMTMu_QE[DistanceNum][EnergyNum] += AverageTrueSPMTMu[LPMTID][DistanceNum][EnergyNum];
+                    TotalTrueSPMTMu_QEErr[DistanceNum][EnergyNum] += AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum]*AverageTrueSPMTMuErr[LPMTID][DistanceNum][EnergyNum];
+
+                    TotalTrueLPMTMu_QE[DistanceNum][EnergyNum] += LPMTTrueMu[LPMTID][DistanceNum][EnergyNum];
+                    TotalTrueLPMTMu_QEErr[DistanceNum][EnergyNum] += (LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum])*(LPMTTrueMuErr[LPMTID][DistanceNum][EnergyNum]);
+                    SelectLPMT += 1;
+                    SelectEntries += Entries[LPMTID][DistanceNum][EnergyNum];
+                }
+            }
+            
+            // 平均LPMTMu、SPMTMu、SPMTP0、LPMTTrueMu，考虑QE
+            if (SelectLPMT > 0)
+            {
+                TotalTrueLPMTMu_QE[DistanceNum][EnergyNum] /= SelectLPMT;
+                TotalTrueLPMTMu_QEErr[DistanceNum][EnergyNum] = sqrt(TotalTrueLPMTMu_QEErr[DistanceNum][EnergyNum])/SelectLPMT;
+
+                TotalTrueSPMTMu_QE[DistanceNum][EnergyNum] /= SelectLPMT;
+                TotalTrueSPMTMu_QEErr[DistanceNum][EnergyNum] = sqrt(TotalTrueSPMTMu_QEErr[DistanceNum][EnergyNum])/SelectLPMT;
+
+                ToGraph_TotalTrueLPMTMu_QE.push_back(TotalTrueLPMTMu_QE[DistanceNum][EnergyNum]);
+                ToGraph_TotalTrueLPMTMu_QEErr.push_back(TotalTrueLPMTMu_QEErr[DistanceNum][EnergyNum]);
+                
+                ToGraph_TotalTrueSPMTMu_QE.push_back(TotalTrueSPMTMu_QE[DistanceNum][EnergyNum]);
+                ToGraph_TotalTrueSPMTMu_QEErr.push_back(TotalTrueSPMTMu_QEErr[DistanceNum][EnergyNum]);
+
+                cout<<"TotalTrueLPMTMu_QE = "<< TotalTrueLPMTMu_QE[DistanceNum][EnergyNum]<<"+-"<<TotalTrueLPMTMu_QEErr[DistanceNum][EnergyNum]<<"  TotalTrueSPMTMu_QE = "<<TotalTrueSPMTMu_QE[DistanceNum][EnergyNum]<<"+-"<<TotalTrueSPMTMu_QEErr[DistanceNum][EnergyNum]<<endl;
+                cout<<"SelectLPMT = "<<SelectLPMT<<"  SelectEntries = "<<SelectEntries<<endl;
+            }
+
+            cout<<"R"<<DistanceNum<<" E"<<EnergyNum<<" finished"<<endl;
+        }
+    }
+
+    // TFile *outputfile = TFile::Open("/junofs/users/chuziliang125/LPMTChargeCalibration/ToyWaveformReconstruction/Alter_10Percent_100PE_B12/npeLPMTtonpeSPMT_B12.root","RECREATE");
+
+    TGraphErrors *npeLPMTtonpeSPMT_tot;
+    TString GraphName = "LPMT #mu to SPMT #mu";
+    npeLPMTtonpeSPMT_tot = new TGraphErrors(ToGraph_TotalLPMTMu_QE.size(),&ToGraph_TotalTrueSPMTMu_QE[0],&ToGraph_TotalLPMTMu_QE[0],&ToGraph_TotalTrueSPMTMu_QEErr[0],&ToGraph_TotalLPMTMu_QEErr[0]);
+    npeLPMTtonpeSPMT_tot->SetTitle(GraphName);
+    npeLPMTtonpeSPMT_tot->SetName(GraphName);
+    npeLPMTtonpeSPMT_tot->GetXaxis()->SetTitle("Average #mu_{SPMT}/QE");
+    npeLPMTtonpeSPMT_tot->GetYaxis()->SetTitle("#mu_{LPMT}/PDE");
+    // npeLPMTtonpeSPMT_tot->SetTitle("");
+    npeLPMTtonpeSPMT_tot->SetFillStyle(3002);
+    npeLPMTtonpeSPMT_tot->SetMarkerColor(4);
+    npeLPMTtonpeSPMT_tot->SetLineColor(4);
+    npeLPMTtonpeSPMT_tot->SetMarkerSize(1.0);
+    npeLPMTtonpeSPMT_tot->SetMarkerStyle(20);
+    npeLPMTtonpeSPMT_tot->SetLineWidth(3);
+    npeLPMTtonpeSPMT_tot->GetXaxis()->CenterTitle();
+    npeLPMTtonpeSPMT_tot->GetYaxis()->CenterTitle();
+    npeLPMTtonpeSPMT_tot->GetXaxis()->SetTitleFont(22);
+    npeLPMTtonpeSPMT_tot->GetYaxis()->SetTitleFont(22);
+    npeLPMTtonpeSPMT_tot->GetXaxis()->SetTitleSize(0.06);
+    npeLPMTtonpeSPMT_tot->GetYaxis()->SetTitleSize(0.06);
+    npeLPMTtonpeSPMT_tot->GetXaxis()->SetLabelSize(0.06);
+    npeLPMTtonpeSPMT_tot->GetYaxis()->SetLabelSize(0.06);
+    npeLPMTtonpeSPMT_tot->GetXaxis()->SetTitleOffset(0.83);
+    npeLPMTtonpeSPMT_tot->GetYaxis()->SetTitleOffset(1.30);
+
+    // TF1 *Below1PE = new TF1("Below1PE","[0]*x",0,0.02);
+    // Below1PE->SetParNames("k");
+    // Below1PE->SetLineColor(kRed);
+    // Below1PE->SetParameter(0,50);
+
+    // npeLPMTtonpeSPMT_tot->Fit(Below1PE,"R F");
+    // Below1PE->SetRange(0,10);
+
+   
+    // npeLPMTtonpeSPMT_tot->Write();
+
+    TGraphErrors *TruenpeLPMTtonpeSPMT_tot;
+    TString GraphName_True = "True LPMT #mu to SPMT #mu";
+    TruenpeLPMTtonpeSPMT_tot = new TGraphErrors(ToGraph_TotalTrueLPMTMu_QE.size(),&ToGraph_TotalTrueSPMTMu_QE[0],&ToGraph_TotalTrueLPMTMu_QE[0],&ToGraph_TotalTrueSPMTMu_QEErr[0],&ToGraph_TotalTrueLPMTMu_QEErr[0]);
+    TruenpeLPMTtonpeSPMT_tot->SetTitle(GraphName_True);
+    TruenpeLPMTtonpeSPMT_tot->SetName(GraphName_True);
+    TruenpeLPMTtonpeSPMT_tot->GetXaxis()->SetTitle("Average #mu_{SPMT}/QE");
+    TruenpeLPMTtonpeSPMT_tot->GetYaxis()->SetTitle("#mu_{LPMT}/PDE");
+    TruenpeLPMTtonpeSPMT_tot->SetFillStyle(3002);
+    TruenpeLPMTtonpeSPMT_tot->SetMarkerColor(5);
+    TruenpeLPMTtonpeSPMT_tot->SetLineColor(5);
+    TruenpeLPMTtonpeSPMT_tot->SetMarkerSize(1.0);
+    TruenpeLPMTtonpeSPMT_tot->SetMarkerStyle(20);
+    TruenpeLPMTtonpeSPMT_tot->SetLineWidth(3);
+
+    // TLegend *legendb =new TLegend(0.6,0.65,0.88,0.85);
+    // legendb->SetTextFont(22);
+    // legendb->AddEntry(npeLPMTtonpeSPMT_tot,"ElecSim LPMT #mu","lpe");
+    // legendb->AddEntry(TruenpeLPMTtonpeSPMT_tot,"True LPMT #mu","lpe"); 
+    
+    TCanvas *c1 = new TCanvas("c1","c1",1);
+    c1->cd();
+    // npeLPMTtonpeSPMT_tot->Draw("A L P");
+    TruenpeLPMTtonpeSPMT_tot->Draw("A L P");
+    // legendb->Draw("same");
+
+
+    return 0;
+}
